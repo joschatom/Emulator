@@ -11,7 +11,7 @@
 #include <Windows.h>
 
 #define TIMEOUT 1000
-#define PC_ENTRY 0xFFFC
+#define PC_ENTRY 0xFF00
 #define RESET_PROCESS_MAX (MEM::MAX_MEM - 0xFFFC)-0x46
 #define HOST_CONTROL_MEMORY_SIZE 0x46
 
@@ -20,17 +20,35 @@
 #define FUNCTIONDEFW(name) Word name(s32& Cycles, const MEM& memory)
 #define FUNCTIONDEFV(name) void name(s32& Cycles, MEM& memory)
 #define LOADREG(addrname, reg) {reg = addrname(Cycles, memory);SetZeroAndNegativeFlags(reg); }
+#define SETSTATUS(name, function) {name = function(Cycles, memory);}
 #define EMPTY	{}
 #define STOREREG(addrname, reg) {Word ST##reg##_Addr = addrname( Cycles, memory );WriteByte(reg, Cycles, ST##reg##_Addr, memory); }
 #define DEFAULT default:{} break;
-#define LOADINGTEXT(txt, times, _t) std::cout << txt;for (int _ = 0; _ < 8; _++) {Sleep(_t);putchar('.');}std::cout << std::endl;
+#define LOADINGTEXT(txt, times, _t) std::cout << txt;for (int _ = 0; _ < 8; _++) {Sleep(_t /1000);putchar('.');}std::cout << std::endl;
 #define range(start, stop) for (int i=start; i<stop; i++)
+#define COMPARE(addrname) {Word Address = addrname( Cycles, memory );Byte Operand=ReadByte(Cycles, Address, memory);RegisterCompare(Operand, A); }
+#define SFLAG(name) {Flag.##name = true;}
+#define CFLAG(name) {Flag.##name = false;}
+
 
 using Byte = unsigned char;
 using Word = unsigned short;
 
 using u32 = unsigned int;
 using s32 = signed int;
+
+struct StatusFlags
+{
+	Byte C : 1;	//0: Carry Flag	
+	Byte Z : 1;	//1: Zero Flag
+	Byte I : 1; //2: Interrupt disable
+	Byte D : 1; //3: Decimal mode
+	Byte B : 1; //4: Break
+	Byte Unused : 1; //5: Unused
+	Byte V : 1; //6: Overflow
+	Byte N : 1; //7: Negative
+
+};
 
 
 struct CPU {
@@ -41,14 +59,11 @@ struct CPU {
 
     Byte A, X, Y;
 
-	Byte C : 1;	//0: Carry Flag	
-	Byte Z : 1;	//1: Zero Flag
-	Byte I : 1; //2: Interrupt disable
-	Byte D : 1; //3: Decimal mode
-	Byte B : 1; //4: Break
-	Byte Unused : 1; //5: Unused
-	Byte V : 1; //6: Overflow
-	Byte N : 1; //7: Negative
+	union // processor status
+	{
+		Byte PS;
+		StatusFlags Flag;
+	};
 
 	MEM Memory;
 
@@ -69,21 +84,21 @@ struct CPU {
 		printf("X=0x%x(%d)\n", X, X);
 		printf("Y=0x%x(%d)\n", Y, Y);
 		printf("[FLAGS]\n");
-		printf("Carry: %x\n", C);
-		printf("Zero: %x\n", Z);
-		printf("Interrupt disable: %x\n", I);
-		printf("Decimal Mode: %x\n", D);
-		printf("Break: %x\n", B);
-		printf("Overflow: %x\n", V);
-		printf("Negative: %x\n", N);
+		printf("Carry: %x\n", Flag.C);
+		printf("Zero: %x\n", Flag.Z);
+		printf("Interrupt disable: %x\n", Flag.I);
+		printf("Decimal Mode: %x\n", Flag.D);
+		printf("Break: %x\n", Flag.B);
+		printf("Overflow: %x\n", Flag.V);
+		printf("Negative: %x\n", Flag.N);
 		printf("[MEMORY]\n");
-		printf("MAX: 0x%x", MEM::MAX_MEM);
+		printf("MAX: 0x%x\n", MEM::MAX_MEM);
 	}
 
 	void SetZeroAndNegativeFlags(Byte Register)
 	{
-		Z = (Register == 0);
-		N = (Register & NegativeFlagBit) > 0;
+		Flag.Z = (Register == 0);
+		Flag.N = (Register & NegativeFlagBit) > 0;
 	}
 
 
@@ -91,7 +106,7 @@ struct CPU {
 	{
 		PC = PC_ENTRY;
 		SP = 0xFF;
-		C = Z = I = D = B = V = N = 0;
+		Flag.C = Flag.Z = Flag.I = Flag.D = Flag.B = Flag.V = Flag.N = 0;
 		A = X = Y = 0;
 		memory.Initialise();
 
@@ -156,6 +171,7 @@ struct CPU {
 
 #pragma region Stack Functions
 
+
 	Word SPToAddress() const
 	{
 		return 0x100 | SP;
@@ -213,6 +229,17 @@ struct CPU {
 		SP += 2;
 		Cycles--;
 		return ValueFromStack;
+	}
+
+	FUNCTIONDEFV(PushPSToStack) {
+		Byte PSStack = PS | BreakFlagBit | UnusedFlagBit;
+		PushByteOntoStack(Cycles, PSStack, memory);
+	}
+
+	FUNCTIONDEFV(PopPSFromStack) {
+		PS = PopByteFromStack(Cycles, memory);
+		Flag.B = false;
+		Flag.Unused = false;
 	}
 
 #pragma endregion
@@ -310,6 +337,13 @@ struct CPU {
 		return EffectiveAddrY;
 	}
 
+	void RegisterCompare(Byte Operand, Byte RegisterValue) {
+		Byte Temp = RegisterValue - Operand;
+		Flag.N = (Temp & NegativeFlagBit) > 0;
+		Flag.Z = RegisterValue == Operand;
+		Flag.C = RegisterValue >= Operand;
+	}
+
 #pragma endregion
 
 
@@ -320,12 +354,10 @@ struct CPU {
 			Memory = memory;
 			Byte Ins = FetchByte(Cycles, memory);
 
-			printf("Emulating %x(%d)\n", Ins, Ins);
-
 			switch (Ins)
 			{
 				INSDEF(HOSTCALL, {
-					printf("Hostcall at $%x\n", PC);
+					//printf("Hostcall at $%x\n", PC);
 					u32 id = (u32)FetchByte(Cycles, memory);
 					void* parameters[3];
 					parameters[0] = (void*)A;
@@ -341,6 +373,24 @@ struct CPU {
 
 					case EXTERNAL_RUNTINE_CODE(30):
 						PrintStatusInfo(memory);
+
+					case EXTERNAL_RUNTINE_CODE(44): {
+						X = Cycles;
+					}
+					case EXTERNAL_RUNTINE_CODE(83): {
+						PC = PC - A;
+					}
+					case EXTERNAL_RUNTINE_CODE(34): {
+						if (Flag.Z == true) {
+							Flag.Z = false;
+							break;
+						}
+						else PC += 2;
+					}
+					case EXTERNAL_RUNTINE_CODE(54): {
+						printf("%d", X);
+					}
+			
 					}
 
 					memory = Memory;
@@ -416,8 +466,7 @@ struct CPU {
 
 				INSDEF(LDY_ABSX, LOADREG(AddrAbsoluteX, Y))
 				
-				// Jump to Sub Rotine
-
+				// Jumps
 				INSDEF(JSR, {
 					Word SubAddr = FetchWord(Cycles, memory);
 					PushPCMinusOneToStack(Cycles, memory);
@@ -429,6 +478,17 @@ struct CPU {
 					Word ReturnAddress = PopWordFromStack(Cycles, memory);
 					PC = ReturnAddress + 1;
 					Cycles -= 2;
+				})
+
+				INSDEF(JMP_ABS, {
+					Word Address = AddrAbsolute(Cycles, memory);
+					PC = Address;
+				})
+
+				INSDEF(JMP_IND, {
+					Word Address = AddrAbsolute(Cycles, memory);
+					Address = ReadWord(Cycles, Address, memory);
+					PC = Address;
 				})
 
 				// Etc.
@@ -466,6 +526,91 @@ struct CPU {
 
 				INSDEF(STY_ABS, STOREREG(AddrAbsolute, Y))
 
+				// Stack
+				INSDEF(TSX, {
+					X = SP;
+					Cycles--;
+					SetZeroAndNegativeFlags(X);
+				})
+
+				INSDEF(TXS, {
+					SP = X;
+					Cycles--;
+				})
+
+				INSDEF(PHA, PushByteOntoStack(Cycles, A, memory);)
+
+				INSDEF(PLA, {
+					A = PopByteFromStack(Cycles, memory);
+					SetZeroAndNegativeFlags(A);
+					Cycles--;
+				})
+
+				INSDEF(PHP, PushPSToStack(Cycles, memory);)
+
+				INSDEF(PLP, {
+					PopPSFromStack(Cycles, memory);
+					Cycles--;
+				})
+
+				// Compare
+
+				INSDEF(CMP, {
+					Byte Operand = FetchByte(Cycles, memory);
+					RegisterCompare(Operand, A);
+				})
+
+				INSDEF(CMP_ZP, COMPARE(AddrZeroPage))
+
+				INSDEF(CMP_ZPX, COMPARE(AddrZeroPageX))
+
+				INSDEF(CMP_ABS, COMPARE(AddrAbsolute))
+
+				INSDEF(CMP_ABSX, COMPARE(AddrAbsoluteX))
+
+				INSDEF(CMP_ABSY, COMPARE(AddrAbsoluteY))
+
+				INSDEF(CMP_INDX, COMPARE(AddrIndirectX))
+
+				INSDEF(CMP_INDY, COMPARE(AddrIndirectY))
+
+				INSDEF(CLC, CFLAG(C))
+
+				INSDEF(SEC, SFLAG(C))
+
+				INSDEF(CLD, CFLAG(D))
+
+				INSDEF(SED, SFLAG(D))
+
+				INSDEF(CLI, CFLAG(I))
+
+				INSDEF(SEI, SFLAG(I))
+
+				INSDEF(CLV, CFLAG(V))
+
+				INSDEF(INX, {
+					X=X+1;
+					Cycles--;
+					SetZeroAndNegativeFlags(X);
+				})
+
+				INSDEF(INY, {
+					Y++;
+					Cycles--;
+					SetZeroAndNegativeFlags(Y);
+				})
+
+				INSDEF(DEX, {
+					X++;
+					Cycles--;
+					SetZeroAndNegativeFlags(X);
+				})
+
+				INSDEF(DEY, {
+					Y++;
+					Cycles--;
+					SetZeroAndNegativeFlags(Y);
+				})
 
 				DEFAULT
 			}
@@ -500,7 +645,7 @@ int main()
 	SetConsoleTitle(L"CONHOST.EXE - 6402-EMULATOR\\WINDOW");
 
 
-	Byte ResetProcess[255];
+	Byte ResetProcess[16];
 
 	ResetProcess[0] = OPCODE(LDA_IM);
 	ResetProcess[1] = 0x55;
@@ -522,24 +667,32 @@ int main()
 
 	std::cout << "Reset Process Max: " << RESET_PROCESS_MAX << std::endl;
 
+	cpu.Reset(mem);
+
+	LOADINGTEXT("Loading Files into Memory", 4, 1000)
+
 	memcpy((&mem[PC_ENTRY]), ResetProcess, 16 * sizeof(Byte));
 	
-	cpu.Reset(mem);
 
 	LOADINGTEXT("Preparing", 5, 1000)
 
 	char* input = {};
 
-	range(0,1)
+	while (true)
 	{
 		//system("cls -A -T (?)");
-		COORD p = { 0, 0 };
-		SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), p);
-		Sleep(1000 * 1.3);
-		RECT rect;
+		/*COORD p = {0, 0};
+		SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), p);*/
+		
 
 		//FillRect(GetDC(GetConsoleWindow()), &rect, (HBRUSH)COLOR_WINDOWTEXT);
+		printf("%d\n", cpu.X);
+
 		cpu.Execute(16, mem);
+
+		cpu.X += 1;
+
+		Sleep(260.8);
 	}
 
 	for (;;);

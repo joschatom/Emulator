@@ -16,9 +16,10 @@ int HandleHostcall(u32 ID, void* Paramters[]) {
 		printf("DATA:{A=%x;X=%x;Y=%x}\n", Paramters[0], Paramters[1], Paramters[2]);
 	case 0x75:EXTERNAL_RUNTINE(75) break;
 	case 0x30:EXTERNAL_RUNTINE(30) break;
-
-	default:
-		break;
+	case 0x44:EXTERNAL_RUNTINE(44) break;
+	case 0x83:EXTERNAL_RUNTINE(83) break;
+	case 0x34:EXTERNAL_RUNTINE(34) break;
+	case 0x54:EXTERNAL_RUNTINE(54) break;
 	}
 
 	return 0;
